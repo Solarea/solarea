@@ -40,9 +40,9 @@ def update_ec2_instances_in_db():
                 # Add any missing ones
                 for x in range(0, process_count - result[0]):
                     cursor.execute(
-                        "INSERT ec2_instance_processes (ec2_instance_name, hostname, status) "
-                        "VALUES (%s, %s, 'idle')",
-                        (name, i.public_dns_name)
+                        "INSERT ec2_instance_processes (ec2_instance_name, ec2_instance_type, hostname, status) "
+                        "VALUES (%s, %s, %s, 'idle')",
+                        (name, instance_type, i.public_dns_name)
                     )
 
     cnx.commit()
@@ -54,11 +54,8 @@ def get_processes_per_instance(instance_type):
     if instance_type == "genomes":
         return 2
 
-    if instance_type == "meta-genome":
-        return 2
-
-    if instance_type == "prokka":
-        return 4
+    if instance_type == "meta.genomes":
+        return 3
 
     raise Exception("unsupported instance type " + instance_type)
 
@@ -76,41 +73,41 @@ def get_db_ec2instance_count():
     return result[0]
 
 
-# Look at all the running servers and get one that isn't overloaded
-def take_next_available_ec2instance_process_slot(process_type, file_info):
+def take_next_available_ec2instance_process_slot(process_type):
     cnx = connect_to_db()
-
     cursor = cnx.cursor()
-    ec2instance_process = None
 
-    cursor.execute("SELECT id, hostname FROM ec2_instance_processes "
-                   "WHERE sp.process_type=%s "
+    process_slot = None
+
+    cursor.execute("SELECT id, hostname "
+                   "FROM ec2_instance_processes e "
+                   "JOIN process_ec2_instance_map p ON e.ec2_instance_type=p.ec2_instance_type "
+                   "WHERE p.process=%s AND status='idle' "
                    "LIMIT 1",
                    (process_type,))
     result = cursor.fetchone()
-    if result is not None:
-        ec2instance_id = result[0]
 
-        cursor.execute("INSERT ec2instance_processes (ec2instance_id, process_type, file_id, status, start_time)"
-                       " VALUES (%s, %s, %s, 'running', NOW())",
-                       (ec2instance_id, process_type, file_info.id))
-        ec2instance_process = [cursor.lastrowid]
+    if result is not None:
+        process_slot = {"id": result[0], "hostname": result[1]}
+        cursor.execute("UPDATE ec2_instance_processes "
+                       "SET status='running' "
+                       "WHERE id=%s",
+                       (result[0],))
         cnx.commit()
 
     cursor.close()
 
-    return ec2instance_process
+    return process_slot
 
 
 # Marks the given EC2 instance with the specified status
-def mark_ec2instance_process_status(ec2instance_process, status):
+def mark_ec2instance_process_status(process_slot, status):
     cnx = connect_to_db()
 
     cursor = cnx.cursor()
 
-    spid = str(ec2instance_process[1])
     cursor.execute("UPDATE ec2_instance_processes SET status=%s, end_time=NOW() WHERE id=%s",
-                   (status, str(spid)))
+                   (status, process_slot["id"]))
     cnx.commit()
 
     cursor.close()
