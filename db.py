@@ -89,7 +89,7 @@ def take_next_available_ec2instance_process_slot(process_type):
     result = cursor.fetchone()
 
     if result is not None:
-        process_slot = {"id": result[0], "hostname": result[1]}
+        process_slot = {"id": result[0], "hostname": result[1], "process_type": process_type}
         cursor.execute("UPDATE ec2_instance_processes "
                        "SET status='running' "
                        "WHERE id=%s",
@@ -107,11 +107,43 @@ def mark_ec2instance_process_status(process_slot, status):
 
     cursor = cnx.cursor()
 
-    cursor.execute("UPDATE ec2_instance_processes SET status=%s, end_time=NOW() WHERE id=%s",
+    cursor.execute("UPDATE ec2_instance_processes SET status=%s WHERE id=%s",
                    (status, process_slot["id"]))
     cnx.commit()
 
     cursor.close()
+
+
+def start_sample_processing(sample_id, process, command):
+    cnx = connect_to_db()
+
+    cursor = cnx.cursor()
+
+    cursor.execute("INSERT sample_processing (sample_id, process, command, start, status) "
+                   "VALUES (%s, %s, %s, NOW(), 'running')",
+                   (sample_id, process, command))
+
+    last_row_id = cursor.lastrowid
+    cnx.commit()
+
+    cursor.close()
+
+    return last_row_id
+
+
+def mark_sample_status(row_id, status):
+    cnx = connect_to_db()
+
+    cursor = cnx.cursor()
+
+    cursor.execute("UPDATE sample_processing SET status=% WHERE ID=%s",
+                   (status, row_id))
+
+    cnx.commit()
+
+    cursor.close()
+
+    return last_row_id
 
 
 # Connects to the database

@@ -68,6 +68,7 @@ def process_file_on_ec2instance(sample_id, process_slot):
     ssh = process_slot["ssh"]
 
     command = "echo Processing " + sample_id + " on " + process_slot["hostname"] + " >> ~/log.txt"
+    row_id = start_sample_processing(sample_id, process=process_slot["process_type"], command=command)
 
     print threading.current_thread().name + ": Executing " + command
 
@@ -83,5 +84,6 @@ def process_file_on_ec2instance(sample_id, process_slot):
     print threading.current_thread().name + ": Execution done, done sleeping"
 
     # When done, mark the process as done
-    mark_ec2instance_process_status(process_slot, "complete")
+    mark_ec2instance_process_status(process_slot, "idle")
+    mark_sample_status(row_id, "completed")
 
