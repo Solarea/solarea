@@ -136,14 +136,12 @@ def mark_sample_status(row_id, status):
 
     cursor = cnx.cursor()
 
-    cursor.execute("UPDATE sample_processing SET status=% WHERE ID=%s",
+    cursor.execute("UPDATE sample_processing SET status=%s, end=NOW() WHERE ID=%s",
                    (status, row_id))
 
     cnx.commit()
 
     cursor.close()
-
-    return last_row_id
 
 
 # Connects to the database

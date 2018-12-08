@@ -20,7 +20,7 @@ class ArgParser:
                 print usage_txt
                 sys.exit()
             elif opt == "-i":
-                self.__sample_ids = arg
+                self.__sample_ids = arg.split(",")
             elif opt == "-p":
                 self.__processes = arg.split(",")
             elif opt == "-e":
