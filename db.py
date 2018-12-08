@@ -5,6 +5,7 @@ user = "solarea"
 password = "solarea1"
 host = "solareadb.ccuiq0ahmnzk.us-east-1.rds.amazonaws.com"
 database = "solarea"
+key_fname = "/Users/tweissin/.ssh/tweissin-key-pair.pem"
 
 
 def update_ec2_instances_in_db():
@@ -21,7 +22,7 @@ def update_ec2_instances_in_db():
             name = i.tags[0]['Value']
             parts = name.split("-")
 
-            if name.startswith("node-") and len(parts) == 3:
+            if name.startswith("node-") and len(parts) == 3 and i.state["Name"] != "terminated":
 
                 instance_type = parts[1]
                 process_count = get_processes_per_instance(instance_type)
@@ -79,7 +80,7 @@ def take_next_available_ec2instance_process_slot(process_type):
 
     process_slot = None
 
-    cursor.execute("SELECT id, hostname "
+    cursor.execute("SELECT e.id, e.hostname "
                    "FROM ec2_instance_processes e "
                    "JOIN process_ec2_instance_map p ON e.ec2_instance_type=p.ec2_instance_type "
                    "WHERE p.process=%s AND status='idle' "

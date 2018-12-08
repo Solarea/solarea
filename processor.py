@@ -20,7 +20,7 @@ def start_processes(arg_parser):
 
             # Get a server to do work
             print threading.current_thread().name + ": waiting for available server... to process " + sample_id
-            process_slot = wait_for_and_get_ec2instance_process_slot(process_type, sample_id)
+            process_slot = wait_for_and_get_ec2instance_process_slot(process_type)
 
             # Submit the work to a thread pool
             executor.submit(process_file_on_ec2instance, sample_id, process_slot)
@@ -46,7 +46,7 @@ def wait_for_and_get_ec2instance_process_slot(process_type):
                 print "connecting to " + hostname
                 ssh.connect(process_slot["hostname"], 22,
                             username="ec2-user",
-                            key_filename="/Users/tweissin/.ssh/tonyweis/tonyweissinger.pem",
+                            key_filename=key_fname,
                             timeout=10)
                 process_slot["ssh"] = ssh
                 return process_slot
