@@ -1,5 +1,6 @@
 import boto3
 import mysql.connector
+from process_slot import ProcessSlot
 
 
 class DatabaseHelpers:
@@ -105,7 +106,7 @@ class DatabaseHelpers:
         result = cursor.fetchone()
 
         if result is not None:
-            process_slot = {"id": result[0], "hostname": result[1], "process_type": process_type}
+            process_slot = ProcessSlot(result[0], result[1], process_type)
             cursor.execute("UPDATE ec2_instance_processes "
                            "SET status='running' "
                            "WHERE id=%s",
@@ -124,7 +125,7 @@ class DatabaseHelpers:
         cursor.execute("UPDATE ec2_instance_processes "
                        "SET status=%s "
                        "WHERE id=%s",
-                       (status, process_slot["id"]))
+                       (status, process_slot.ec2_process_id))
         cnx.commit()
         cursor.close()
         cnx.close()

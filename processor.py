@@ -3,6 +3,7 @@ import time
 import threading
 from concurrent.futures import *
 import socket
+import traceback
 
 
 class Processor:
@@ -49,7 +50,7 @@ class Processor:
         while True:
             process_slot = self.__db.take_next_available_ec2instance_process_slot(process_type)
             if process_slot is not None:
-                hostname = process_slot["hostname"]
+                hostname = process_slot.hostname
 
                 try:
                     # Try to make a connection to this server
@@ -57,11 +58,11 @@ class Processor:
                     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
                     print "connecting to " + hostname
-                    ssh.connect(process_slot["hostname"], 22,
+                    ssh.connect(process_slot.hostname, 22,
                                 username="ec2-user",
                                 key_filename=self.__config.ssh_key_file,
                                 timeout=10)
-                    process_slot["ssh"] = ssh
+                    process_slot.ssh_client = ssh
                     return process_slot
                 except (paramiko.BadHostKeyException, paramiko.AuthenticationException,
                         paramiko.SSHException, socket.error) as e:
@@ -76,25 +77,33 @@ class Processor:
 
     # Processes the specified file on the given server
     def process_file_on_ec2instance(self, sample_id, process_slot):
-        ssh = process_slot["ssh"]
 
-        command = "echo Processing " + sample_id + " on " + process_slot["hostname"] + " >> ~/log.txt"
-        row_id = self.__db.start_sample_processing(sample_id, process=process_slot["process_type"], command=command)
+        try:
+            ssh = process_slot.ssh_client
 
-        print threading.current_thread().name + ": Executing " + command
+            print threading.current_thread().name + ": Starting process on sample " + sample_id
 
-        # This does the actual work!!
-        stdin, stdout, stderr = ssh.exec_command(command)
+            command = "echo Processing " + sample_id + " on " + process_slot.hostname + " >> ~/log.txt"
+            row_id = self.__db.start_sample_processing(sample_id, process=process_slot.process, command=command)
 
-        data = stdout.readlines()
-        print data
+            print threading.current_thread().name + ": Executing " + command
 
-        # Simulate a long running task
-        print threading.current_thread().name + ": Execution done, sleeping a bit..."
-        time.sleep(5)
-        print threading.current_thread().name + ": Execution done, done sleeping"
+            # This does the actual work!!
+            stdin, stdout, stderr = ssh.exec_command(command)
 
-        # When done, mark the process as done
-        self.__db.mark_ec2instance_process_status(process_slot, "idle")
-        self.__db.mark_sample_status(row_id, "completed")
+            data = stdout.readlines()
+            print data
+
+            # Simulate a long running task
+            print threading.current_thread().name + ": Execution done, sleeping a bit..."
+            time.sleep(5)
+            print threading.current_thread().name + ": Execution done on " + sample_id
+
+            # When done, mark the process as done
+            self.__db.mark_ec2instance_process_status(process_slot, "idle")
+            self.__db.mark_sample_status(row_id, "completed")
+
+        except Exception as e:
+            print threading.current_thread().name + ": error while processing sample " + sample_id
+            traceback.print_exc(e)
 
