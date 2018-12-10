@@ -15,6 +15,8 @@ class Processor:
     # Starts processing the files
     def start_processes(self):
 
+        self.__db.validate_process_list(self.__arg_parser.processes)
+
         # Get total number of servers.  Our thread pool has to be >= server count or else we're not maximizing usage.
         thread_pool_size = self.__db.get_db_ec2instance_count()
 
@@ -23,6 +25,11 @@ class Processor:
         for sample_id in self.__arg_parser.sample_ids:
 
             for process_type in self.__arg_parser.processes:
+                count = self.__db.get_sample_id_count(sample_id, process_type)
+
+                if count > 0:
+                    print "Already processed " + sample_id + " for process " + process_type
+                    continue
 
                 # Get a server to do work
                 print threading.current_thread().name + ": waiting for available server... to process " + sample_id
@@ -33,6 +40,7 @@ class Processor:
 
         print threading.current_thread().name + ": waiting on threads"
         executor.shutdown()
+        print "Exiting"
         exit(0)
 
     # Waits for a server to be available
