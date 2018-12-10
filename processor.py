@@ -60,8 +60,7 @@ class Processor:
 
                     # Failed to connect, mark the server in an error state
                     print "error connecting to " + hostname + ", marking as error status: " + str(e)
-                    # TODO
-                    #mark_server_status(server, "error")
+                    self.__db.mark_ec2instance_process_status(process_slot, "error")
 
             # Keep waiting for an available server
             print "No available server, sleeping."
