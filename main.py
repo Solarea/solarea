@@ -1,14 +1,17 @@
 from processor import *
 from arg_parser import *
+from config import Config
+from db import DatabaseHelpers
 
 arg_parser = ArgParser()
 arg_parser.parse()
 
-# Updates the database with all EC2 instances
-update_ec2_instances_in_db()
+config = Config()
+db = DatabaseHelpers(config)
+processor = Processor(arg_parser, db, config)
 
-# Updates all files that need to be processed
-#update_files_in_db_from_excel()
+# Updates the database with all EC2 instances
+db.update_ec2_instances_in_db()
 
 # Start processing data
-start_processes(arg_parser)
+processor.start_processes()

@@ -1,283 +1,184 @@
 import boto3
 import mysql.connector
-import pandas
-from file_info import FileInfo
-from itertools import ifilterfalse
-
-user = "solarea"
-password = "solarea1"
-host = "solareadb.ccuiq0ahmnzk.us-east-1.rds.amazonaws.com"
-database = "solarea"
-spreadsheet = "/Users/tweissin/OneDrive/Documents/solarea/Solarea_metadata_samples 2018.5.30 brief.xlsx"
-sheet_name = "strains"
-column_name = "Isolate record"
+from process_slot import ProcessSlot
 
 
-# Reads all EC2 instances in AWS and stores them in the "ec2_instances" table
-def update_ec2_instances_in_db():
-    ec2 = boto3.resource('ec2')
+class DatabaseHelpers:
 
-    print "Updating EC2 instances in database"
+    def __init__(self, config):
+        self.__config = config
 
-    print " - connecting to DB"
-    cnx = connect_to_db()
-    cursor = cnx.cursor()
+    def update_ec2_instances_in_db(self):
+        ec2 = boto3.resource('ec2')
 
-    for i in ec2.instances.all():
-        if i.tags is not None:
-            name = i.tags[0]['Value']
-            parts = name.split("-")
-            if name.startswith("node-") and len(parts) == 3:
-                process_type = parts[1]
-                ec2instance = {
-                    'hostname': i.public_dns_name,
-                    'instance_type': i.instance_type,
-                    'process_type': process_type
-                }
+        print "Updating EC2 instances in database"
 
-                cursor.execute(
-                    "SELECT id, COUNT(*) FROM ec2instances WHERE hostname=%s",
-                    (i.public_dns_name,)
-                )
-                result = cursor.fetchone()
-
-                if result[0] == 0:
-                    insert_ec2_instance(cursor, ec2instance)
-                else:
-                    print " - EC2 instance already exists: " + name
-            else:
-                print " - Skipping EC2 instance (name is not in proper format): " + name
-
-    cnx.commit()
-    cursor.close()
-    cnx.close()
-
-
-def insert_ec2_instance(cursor, ec2instance):
-    print(" - Inserting " + str(ec2instance['hostname']))
-    cursor.execute(
-        "INSERT INTO ec2instances (hostname, instance_type, process_type, status) VALUES (%s, %s, %s, %s)",
-        (ec2instance['hostname'], ec2instance['instance_type'], ec2instance['process_type'], 'available')
-    )
-
-
-# Returns all hostnames in the DB
-def get_db_hostnames(cnx):
-
-    hostnames = []
-    cursor = cnx.cursor()
-
-    cursor.execute("SELECT hostname FROM ec2instances")
-    result = cursor.fetchall()
-
-    for hostname in result:
-        hostnames.append(str(hostname[0]))
-
-    cursor.close()
-
-    return hostnames
-
-
-# Returns the total number of slots available for server processing
-def get_db_ec2instance_count():
-    cnx = connect_to_db()
-    cursor = cnx.cursor()
-
-    cursor.execute("SELECT count(*) c FROM ec2instance_processes")
-    result = cursor.fetchone()
-
-    cursor.close()
-
-    return result[0]
-
-
-def get_files_to_process(arg_parser):
-    print "Getting files to process"
-
-    file_infos = []
-
-    if arg_parser.selection_criteria == "files":
-        # selection_criteria is files.
-        cnx = connect_to_db()
+        print " - connecting to DB"
+        cnx = self.connect_to_db()
         cursor = cnx.cursor()
 
-        format_strings = ','.join(['%s'] * len(arg_parser.files))
-        cursor.execute("SELECT isolate_record, genus, species FROM files WHERE isolate_record IN (%s)" % format_strings,
-                       tuple(arg_parser.files))
+        for i in ec2.instances.all():
+            if i.tags is not None:
+                name = i.tags[0]['Value']
+                parts = name.split("-")
 
-        # get all that match with the files passed in
-        for row in cursor.fetchall():
-            file_infos.append(FileInfo(row[0], row[1], row[2]))
+                if name.startswith("node-") and len(parts) == 3 and i.state["Name"] != "terminated":
 
-        # this gets all processes that are running or have completed the specified files already
-        cursor.execute("SELECT f.isolate_record FROM ec2instance_processes sp "
-                       "JOIN files f ON f.id=sp.file_id "
-                       "WHERE f.isolate_record IN (%s)" % format_strings,
-                       tuple(arg_parser.files))
+                    instance_type = parts[1]
+                    process_count = self.get_processes_per_instance(instance_type)
 
-        # exclude files whose ec2instance_processes are not already running or complete
-        for row in cursor.fetchall():
-            file_infos[:] = ifilterfalse(lambda fi: fi.isolate_record == row[0], file_infos)
+                    cursor.execute(
+                        "SELECT COUNT(*) "
+                        "FROM ec2_instance_processes "
+                        "WHERE ec2_instance_name=%s",
+                        (name,)
+                    )
+                    result = cursor.fetchone()
+
+                    if process_count < result[0]:
+                        raise Exception("Too many records in DB, "
+                                        "try deleting ec2_instance_processes records"
+                                        " for type '" + instance_type + "'")
+
+                    # Add any missing ones
+                    for x in range(0, process_count - result[0]):
+                        cursor.execute(
+                            "INSERT ec2_instance_processes (ec2_instance_name, ec2_instance_type, hostname, status) "
+                            "VALUES (%s, %s, %s, 'idle')",
+                            (name, instance_type, i.public_dns_name)
+                        )
+
+        cnx.commit()
+        cursor.close()
+        cnx.close()
+
+    @staticmethod
+    def get_processes_per_instance(instance_type):
+        if instance_type == "genomes":
+            return 2
+
+        if instance_type == "meta.genomes":
+            return 3
+
+        raise Exception("unsupported instance type " + instance_type)
+
+    # Returns the total number of slots available for server processing
+    def get_db_ec2instance_count(self):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
+
+        cursor.execute("SELECT count(*) c "
+                       "FROM ec2_instance_processes")
+        result = cursor.fetchone()
 
         cursor.close()
+        cnx.close()
+        return result[0]
 
-        # return just the files to process
+    def get_sample_id_count(self, sample_id, process):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
 
-    elif arg_parser.selection_criteria == "genus_species":
-        # selection_criteria is genus_species:
-        # return files only where the genus and species match the input
-        # exclude files whose ec2instance_processes are not already running or complete
-        print "genus and/or species criteria"
+        cursor.execute("SELECT COUNT(*) "
+                       "FROM sample_processing "
+                       "WHERE sample_id=%s AND process=%s",
+                       (sample_id, process))
+        result = cursor.fetchone()
+        cursor.close()
+        cnx.close()
 
-    else:
-        print "invalid selection_criteria: " + arg_parser.selection_criteria
+        if result is None:
+            return 0
 
-    # Limit based on count
-    if arg_parser.count is not None:
-        return file_infos[0:arg_parser.count]
+        return result[0]
 
-    return file_infos
+    def take_next_available_ec2instance_process_slot(self, process_type):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
+        process_slot = None
 
+        cursor.execute("SELECT e.id, e.hostname "
+                       "FROM ec2_instance_processes e "
+                       "JOIN process_ec2_instance_map p ON e.ec2_instance_type=p.ec2_instance_type "
+                       "WHERE p.process=%s AND status='idle' "
+                       "LIMIT 1",
+                       (process_type,))
+        result = cursor.fetchone()
 
-def print_s3_buckets():
+        if result is not None:
+            process_slot = ProcessSlot(result[0], result[1], process_type)
+            cursor.execute("UPDATE ec2_instance_processes "
+                           "SET status='running' "
+                           "WHERE id=%s",
+                           (result[0],))
+            cnx.commit()
 
-    s3 = boto3.resource('s3')
+        cursor.close()
+        cnx.close()
+        return process_slot
 
-    for bucket in s3.buckets.all():
-        print(bucket.name)
+    # Marks the given EC2 instance with the specified status
+    def mark_ec2instance_process_status(self, process_slot, status):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
 
-
-# Takes the spreadsheet as input and updates the files DB table
-def update_files_in_db_from_excel():
-
-    print "Update files database with data from Excel"
-
-    print " - reading Excel spreadsheet " + spreadsheet
-    df = pandas.read_excel(spreadsheet, sheet_name=sheet_name)
-
-    cnx = connect_to_db()
-
-    print " - reading existing db files"
-    db_file_infos = get_db_files(cnx)
-    cursor = cnx.cursor()
-
-    db_isolate_records = list(map(lambda x: x.isolate_record, db_file_infos))
-
-    for row in df.iterrows():
-        isolate_record = row[1][0]
-        if isolate_record not in db_isolate_records:
-            print(" - Inserting " + isolate_record)
-            if isolate_record == "SBI0013":
-                print "bad stuff here"
-
-            genus = row[1].Genus
-            species = row[1].species
-
-            if not isinstance(genus, basestring):
-                genus = ""
-
-            if not isinstance(species, basestring):
-                species = ""
-
-            cursor.execute("INSERT INTO files (isolate_record, genus, species) VALUES (%s, %s, %s)",
-                           (isolate_record, genus, species))
-
-    cnx.commit()
-    cursor.close()
-    cnx.close()
-
-
-# Returns all the files currently in the DB
-def get_db_files(cnx):
-
-    file_infos = []
-    cursor = cnx.cursor()
-
-    cursor.execute("SELECT isolate_record, genus, species FROM files")
-    result = cursor.fetchall()
-
-    for f in result:
-        file_info = FileInfo(str(f[0]), str(f[1]), str(f[2]))
-
-        print "found isolate_record " + file_info.isolate_record
-        file_infos.append(file_info)
-
-    cursor.close()
-
-    return file_infos
-
-
-# Returns the next file that hasn't been processed, and marks as in progress.
-def take_next_file_to_process():
-    cnx = connect_to_db()
-
-    cursor = cnx.cursor()
-
-    cursor.execute("SELECT id, input_file FROM files WHERE status='not_processed' LIMIT 1")
-    result = cursor.fetchone()
-
-    if result is not None:
-        cursor.execute("UPDATE files SET status='in_progress', start_time=NOW() WHERE id='" + str(result[0]) + "'")
+        cursor.execute("UPDATE ec2_instance_processes "
+                       "SET status=%s "
+                       "WHERE id=%s",
+                       (status, process_slot.ec2_process_id))
         cnx.commit()
+        cursor.close()
+        cnx.close()
 
-    cursor.close()
+    def start_sample_processing(self, sample_id, process, command):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
 
-    return result
+        cursor.execute("INSERT sample_processing (sample_id, process, command, start, status) "
+                       "VALUES (%s, %s, %s, NOW(), 'running')",
+                       (sample_id, process, command))
 
-
-# Look at all the running servers and get one that isn't overloaded
-def take_next_available_ec2instance_process_slot(process_type, file_info):
-    cnx = connect_to_db()
-
-    cursor = cnx.cursor()
-    ec2instance_process = None
-
-    # cursor.execute("SELECT s.id, sp.id spid, sp.status, sp.process_type, COUNT(*) c, s.hostname "
-    #                "FROM ec2instance_processes sp "
-    #                "JOIN ec2instances s ON s.id=sp.ec2instance_id "
-    #                "WHERE sp.status='running' "
-    #                "AND sp.process_type=%s"
-    #                "GROUP BY s.id, sp.status, sp.process_type "
-    #                "ORDER BY c DESC",
-    #                (process_type,))
-
-    cursor.execute("SELECT id, hostname FROM ec2instances "
-                   "WHERE sp.process_type=%s "
-                   "LIMIT 1",
-                   (process_type,))
-    result = cursor.fetchone()
-    if result is not None:
-        ec2instance_id = result[0]
-
-        cursor.execute("INSERT ec2instance_processes (ec2instance_id, process_type, file_id, status, start_time)"
-                       " VALUES (%s, %s, %s, 'running', NOW())",
-                       (ec2instance_id, process_type, file_info.id))
-        ec2instance_process = [cursor.lastrowid]
+        last_row_id = cursor.lastrowid
         cnx.commit()
+        cursor.close()
+        cnx.close()
+        return last_row_id
 
-    cursor.close()
+    def mark_sample_status(self, row_id, status):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
+        cursor.execute("UPDATE sample_processing "
+                       "SET status=%s, end=NOW() "
+                       "WHERE ID=%s",
+                       (status, row_id))
 
-    return ec2instance_process
+        cnx.commit()
+        cursor.close()
+        cnx.close()
 
+    def validate_process_list(self, processes):
+        cnx = self.connect_to_db()
+        cursor = cnx.cursor()
 
-# Marks the given EC2 instance with the specified status
-def mark_ec2instance_process_status(ec2instance_process, status):
-    cnx = connect_to_db()
+        format_strings = ','.join(['%s'] * len(processes))
+        cursor.execute("SELECT process "
+                       "FROM process_ec2_instance_map "
+                       "WHERE process in (%s)" % format_strings,
+                       processes)
+        result = cursor.fetchall()
 
-    cursor = cnx.cursor()
+        cursor.close()
+        cnx.close()
 
-    spid = str(ec2instance_process[1])
-    cursor.execute("UPDATE ec2instance_processes SET status=%s, end_time=NOW() WHERE id=%s",
-                   (status, str(spid)))
-    cnx.commit()
+        diff = set(processes).difference(set([item[0] for item in result]))
+        if len(diff) > 0:
+            print "invalid process names, add a mapping to process_ec2_instance_map: " + str(diff)
+            exit(2)
 
-    cursor.close()
-
-
-# Connects to the database
-def connect_to_db():
-    return mysql.connector.connect(
-        user=user,
-        password=password,
-        host=host,
-        database=database)
+    # Connects to the database
+    def connect_to_db(self):
+        return mysql.connector.connect(
+            user=self.__config.db_user,
+            password=self.__config.db_password,
+            host=self.__config.db_host,
+            database=self.__config.db_name)

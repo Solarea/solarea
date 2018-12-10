@@ -1,91 +1,109 @@
-from db import *
 import paramiko
 import time
 import threading
 from concurrent.futures import *
 import socket
+import traceback
 
 
-# Starts processing the files
-def start_processes(arg_parser):
+class Processor:
 
-    # Get total number of servers.  Our thread pool has to be >= server count or else we're not maximizing usage.
-    thread_pool_size = get_db_ec2instance_count()
+    def __init__(self, arg_parser, db, config):
+        self.__config = config
+        self.__arg_parser = arg_parser
+        self.__db = db
 
-    file_infos = get_files_to_process(arg_parser)
+    # Starts processing the files
+    def start_processes(self):
 
-    # This is used to manage spinning off work as a thread
-    executor = ThreadPoolExecutor(max_workers=thread_pool_size)
-    for file_info in file_infos:
+        self.__db.validate_process_list(self.__arg_parser.processes)
 
-        for process_type in arg_parser.processes:
+        # Get total number of servers.  Our thread pool has to be >= server count or else we're not maximizing usage.
+        thread_pool_size = self.__db.get_db_ec2instance_count()
 
-            # Get a server to do work
-            print threading.current_thread().name + ": waiting for available server... to process " \
-                  + file_info.isolate_record
-            ec2instance_process = wait_for_and_get_ec2instance_process_slot(process_type, file_info)
+        # This is used to manage spinning off work as a thread
+        executor = ThreadPoolExecutor(max_workers=thread_pool_size)
+        for sample_id in self.__arg_parser.sample_ids:
 
-            # Submit the work to a thread pool
-            executor.submit(process_file_on_ec2instance, file_info, ec2instance_process)
+            for process_type in self.__arg_parser.processes:
+                count = self.__db.get_sample_id_count(sample_id, process_type)
 
-    print threading.current_thread().name + ": waiting on threads"
-    executor.shutdown()
-    exit(0)
+                if count > 0:
+                    print "Already processed " + sample_id + " for process " + process_type
+                    continue
 
+                # Get a server to do work
+                print threading.current_thread().name + ": waiting for available server... to process " + sample_id
+                process_slot = self.wait_for_and_get_ec2instance_process_slot(process_type)
 
-# Waits for a server to be available
-def wait_for_and_get_ec2instance_process_slot(process_type, file_info):
+                # Submit the work to a thread pool
+                executor.submit(self.process_file_on_ec2instance, sample_id, process_slot)
 
-    while True:
-        ec2instance_process = take_next_available_ec2instance_process_slot(process_type, file_info)
-        if ec2instance_process is not None:
-            hostname = ec2instance_process[0]
+        print threading.current_thread().name + ": waiting on threads"
+        executor.shutdown()
+        print "Exiting"
+        exit(0)
 
-            try:
-                # Try to make a connection to this server
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Waits for a server to be available
+    def wait_for_and_get_ec2instance_process_slot(self, process_type):
 
-                print "connecting to " + hostname
-                ssh.connect(hostname, 22,
-                            username="ec2-user",
-                            key_filename="/Users/tweissin/.ssh/tonyweis/tonyweissinger.pem",
-                            timeout=10)
-                return ec2instance_process[0], ec2instance_process[1], ssh
-            except (paramiko.BadHostKeyException, paramiko.AuthenticationException,
-                    paramiko.SSHException, socket.error) as e:
+        while True:
+            process_slot = self.__db.take_next_available_ec2instance_process_slot(process_type)
+            if process_slot is not None:
+                hostname = process_slot.hostname
 
-                # Failed to connect, mark the server in an error state
-                print "error connecting to " + hostname + ", marking as error status: " + str(e)
-                # TODO
-                #mark_server_status(server, "error")
+                try:
+                    # Try to make a connection to this server
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        # Keep waiting for an available server
-        print "No available server, sleeping."
-        time.sleep(5)
+                    print "connecting to " + hostname
+                    ssh.connect(process_slot.hostname, 22,
+                                username="ec2-user",
+                                key_filename=self.__config.ssh_key_file,
+                                timeout=10)
+                    process_slot.ssh_client = ssh
+                    return process_slot
+                except (paramiko.BadHostKeyException, paramiko.AuthenticationException,
+                        paramiko.SSHException, socket.error) as e:
 
+                    # Failed to connect, mark the server in an error state
+                    print "error connecting to " + hostname + ", marking as error status: " + str(e)
+                    self.__db.mark_ec2instance_process_status(process_slot, "error")
 
-# Processes the specified file on the given server
-def process_file_on_ec2instance(file_info, ec2instance_process):
-    input_file = file_info[1]
-    hostname = ec2instance_process[0]
-    ssh = ec2instance_process[2]
+            # Keep waiting for an available server
+            print "No available server, sleeping."
+            time.sleep(5)
 
-    command = "echo Processing " + input_file + " on " + hostname + " >> ~/log.txt"
+    # Processes the specified file on the given server
+    def process_file_on_ec2instance(self, sample_id, process_slot):
 
-    print threading.current_thread().name + ": Executing " + command
+        try:
+            ssh = process_slot.ssh_client
 
-    # This does the actual work!!
-    stdin, stdout, stderr = ssh.exec_command(command)
+            print threading.current_thread().name + ": Starting process on sample " + sample_id
 
-    data = stdout.readlines()
-    print data
+            command = "echo Processing " + sample_id + " on " + process_slot.hostname + " >> ~/log.txt"
+            row_id = self.__db.start_sample_processing(sample_id, process=process_slot.process, command=command)
 
-    # Simulate a long running task
-    print threading.current_thread().name + ": Execution done, sleeping a bit..."
-    time.sleep(5)
-    print threading.current_thread().name + ": Execution done, done sleeping"
+            print threading.current_thread().name + ": Executing " + command
 
-    # When done, mark the process as done
-    mark_ec2instance_process_status(ec2instance_process, "complete")
+            # This does the actual work!!
+            stdin, stdout, stderr = ssh.exec_command(command)
+
+            data = stdout.readlines()
+            print data
+
+            # Simulate a long running task
+            print threading.current_thread().name + ": Execution done, sleeping a bit..."
+            time.sleep(5)
+            print threading.current_thread().name + ": Execution done on " + sample_id
+
+            # When done, mark the process as done
+            self.__db.mark_ec2instance_process_status(process_slot, "idle")
+            self.__db.mark_sample_status(row_id, "completed")
+
+        except Exception as e:
+            print threading.current_thread().name + ": error while processing sample " + sample_id
+            traceback.print_exc(e)
 
